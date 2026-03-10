@@ -1,3 +1,4 @@
 webexpythonsdk>=2.0.0,<3.0.0
 python-dotenv>=1.0.0
 tzdata>=2024.1
+requests>=2.28.0

@@ -19,6 +19,8 @@ from dotenv import load_dotenv
 from webexpythonsdk import WebexAPI
 from webexpythonsdk.exceptions import ApiError
 
+import webex_auth
+
 # Windows console の文字化け対策
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -391,7 +393,7 @@ def parse_args() -> argparse.Namespace:
         description="Fetch Webex room messages since a given datetime."
     )
 
-    room_group = parser.add_mutually_exclusive_group(required=True)
+    room_group = parser.add_mutually_exclusive_group(required=False)
     room_group.add_argument(
         "--room-info", "-ri",
         help="Space info text (for dev/debug; use --room-info-file for production).",
@@ -407,8 +409,12 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--after", "-a",
-        required=True,
         help="Fetch messages created on or after this datetime (YYYY-MM-DD or ISO8601).",
+    )
+    parser.add_argument(
+        "--auth",
+        action="store_true",
+        help="Authenticate with Webex via OAuth (opens browser).",
     )
     parser.add_argument(
         "--format", "-f",
@@ -463,8 +469,21 @@ def main() -> None:
     args = parse_args()
     verbose = args.verbose
 
-    # 環境変数チェック
-    token = validate_environment()
+    # --- Auth mode ---
+    if args.auth:
+        webex_auth.run_oauth_flow(verbose)
+        return
+
+    # --- Normal mode: 必須引数の検証 ---
+    if not (args.room_info or args.room_info_file or args.room_id):
+        print("Error: --room-info, --room-info-file, --room-id のいずれかが必要です。", file=sys.stderr)
+        sys.exit(EXIT_ARG_ERROR)
+    if not args.after:
+        print("Error: --after は必須です。", file=sys.stderr)
+        sys.exit(EXIT_ARG_ERROR)
+
+    # --- トークン解決 ---
+    token = webex_auth.resolve_access_token(verbose)
 
     # Room ID 解決
     try:
