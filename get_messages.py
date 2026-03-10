@@ -46,6 +46,10 @@ UUID_PATTERN = re.compile(
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
     re.IGNORECASE,
 )
+SPACE_NAME_PATTERN = re.compile(
+    r"Space\s*name\s*[:：]\s*(.+)",
+    re.IGNORECASE,
+)
 
 LOCAL_TZ = ZoneInfo("Asia/Tokyo")
 
@@ -59,6 +63,14 @@ def encode_room_id(room_uuid: str, region: str = "us") -> str:
     u = _uuid.UUID(room_uuid)
     plain = f"ciscospark://{region}/ROOM/{str(u).upper()}"
     return base64.urlsafe_b64encode(plain.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def extract_space_name(text: str) -> str | None:
+    """Space 情報テキストから Space name を抽出する。"""
+    match = SPACE_NAME_PATTERN.search(text)
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 def extract_uuid_from_room_info(text: str) -> str:
@@ -104,13 +116,13 @@ def resolve_room_id_direct(room_id_str: str, region: str) -> str:
     )
 
 
-def resolve_room_id(args, verbose: bool) -> str:
-    """CLI 引数から API 用 roomId を解決する。"""
+def resolve_room_id(args, verbose: bool) -> tuple[str, str | None]:
+    """CLI 引数から API 用 roomId を解決する。Space name も返す。"""
     if args.room_id:
         room_id = resolve_room_id_direct(args.room_id, region=args.region)
         if verbose:
             print(f"[verbose] Room ID resolved from --room-id: {room_id}", file=sys.stderr)
-        return room_id
+        return (room_id, None)
 
     # room-info / room-info-file からテキストを取得
     if args.room_info_file:
@@ -122,6 +134,10 @@ def resolve_room_id(args, verbose: bool) -> str:
     else:
         text = args.room_info
 
+    space_name = extract_space_name(text)
+    if verbose and space_name:
+        print(f"[verbose] Space name: {space_name}", file=sys.stderr)
+
     room_uuid = extract_uuid_from_room_info(text)
     if verbose:
         print(f"[verbose] Extracted UUID: {room_uuid}", file=sys.stderr)
@@ -129,7 +145,7 @@ def resolve_room_id(args, verbose: bool) -> str:
     room_id = encode_room_id(room_uuid, region=args.region)
     if verbose:
         print(f"[verbose] Encoded roomId: {room_id}", file=sys.stderr)
-    return room_id
+    return (room_id, space_name)
 
 
 # ======================================================================
@@ -280,7 +296,8 @@ def get_sender_name(msg, name_cache: dict) -> str:
 # ======================================================================
 
 def format_text_output(
-    messages: list, name_cache: dict, room_id: str, after_dt: datetime
+    messages: list, name_cache: dict, room_id: str, after_dt: datetime,
+    space_name: str | None = None,
 ) -> str:
     """text 形式の出力文字列を生成する。"""
     after_utc_str = format_utc_iso(after_dt)
@@ -288,6 +305,8 @@ def format_text_output(
     after_local_str = after_local.strftime("%Y-%m-%d %H:%M %Z")
 
     lines = []
+    if space_name:
+        lines.append(f"[{space_name}]")
     for msg in messages:
         created = _parse_created(msg.created)
         local_created = created.astimezone(LOCAL_TZ)
@@ -315,7 +334,7 @@ def format_text_output(
         )
     else:
         lines.append(
-            f"No messages found with created >= {after_utc_str} "
+            f"0 messages found with created >= {after_utc_str} "
             f"(= {after_local_str})"
         )
 
@@ -449,7 +468,7 @@ def main() -> None:
 
     # Room ID 解決
     try:
-        room_id = resolve_room_id(args, verbose)
+        room_id, space_name = resolve_room_id(args, verbose)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(EXIT_ROOM_ERROR)
@@ -478,8 +497,14 @@ def main() -> None:
     try:
         messages = fetch_messages(api, room_id, after_dt, args.limit, verbose)
     except ApiError as e:
-        print(f"Error: Failed to fetch messages: {e}", file=sys.stderr)
-        sys.exit(EXIT_API_ERROR)
+        status = e.status_code if hasattr(e, "status_code") else None
+        if status == 404:
+            if verbose:
+                print("[verbose] 404 on message fetch, treating as 0 messages.", file=sys.stderr)
+            messages = []
+        else:
+            print(f"Error: Failed to fetch messages: {e}", file=sys.stderr)
+            sys.exit(EXIT_API_ERROR)
 
     # 投稿者名解決
     name_cache = resolve_names(api, messages, verbose)
@@ -488,7 +513,7 @@ def main() -> None:
     if args.format == "json":
         result = format_json_output(messages, name_cache, room_id, after_dt)
     else:
-        result = format_text_output(messages, name_cache, room_id, after_dt)
+        result = format_text_output(messages, name_cache, room_id, after_dt, space_name=space_name)
 
     # stdout 出力（先に実行）
     print(result)
