@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# IDE / editor
+.claude/
+
+# Project internal docs
+plans/
+docs/
+
+# Temporary files
+room_temp.txt
