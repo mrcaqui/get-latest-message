@@ -24,7 +24,20 @@
 - .env.example
 - .gitignore
 
-#### 2. Webex OAuth 認証の実装 (v0.3.0)
+#### 2. Space name ヘッダー追加 & 404 時の出力改善 (v0.2.0)
+
+**Changes**
+
+- テキスト出力の冒頭に `[Space name]` ヘッダーを追加。`--room-info` / `--room-info-file` 使用時に room info テキストから Space name を抽出して表示する。`--room-id` 直接指定時は表示なし。
+- メッセージ取得 API で 404 エラーが返った場合、エラー終了せず `0 messages found ...` として正常出力するように変更。
+- 空メッセージ時のフッターテキストを `"No messages found"` → `"0 messages found"` に統一。
+
+**Changed files**
+
+- get_messages.py
+- .gitignore
+
+#### 3. Webex OAuth 認証の実装 (v0.3.0)
 
 **Changes**
 
@@ -41,15 +54,16 @@
 - .gitignore
 - requirements.txt
 
-#### 3. Space name ヘッダー追加 & 404 時の出力改善 (v0.2.0)
+#### 4. 添付ファイル名表示 (v0.4.0)
 
 **Changes**
 
-- テキスト出力の冒頭に `[Space name]` ヘッダーを追加。`--room-info` / `--room-info-file` 使用時に room info テキストから Space name を抽出して表示する。`--room-id` 直接指定時は表示なし。
-- メッセージ取得 API で 404 エラーが返った場合、エラー終了せず `0 messages found ...` として正常出力するように変更。
-- 空メッセージ時のフッターテキストを `"No messages found"` → `"0 messages found"` に統一。
+- 添付ファイル付きメッセージでファイル名を表示する機能を追加。URLパスからファイル名を抽出し、テキスト出力では `[Files: filename.png]` として表示。
+- 本文なし＋ファイルありの場合は `[Files: ...]` を本文として表示。本文あり＋ファイルありの場合は本文の次行に表示。
+- JSON出力に `filenames` フィールドを追加（既存の `files` (生URL) は後方互換のため維持）。
+- ファイル名が取れないURL（Webex contents API URLなど拡張子なし）は `(file)` にフォールバック。
 
 **Changed files**
 
 - get_messages.py
-- .gitignore
+- docs/progress.md

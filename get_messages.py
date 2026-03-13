@@ -7,9 +7,11 @@
 import argparse
 import base64
 import json
+import posixpath
 import re
 import subprocess
 import sys
+from urllib.parse import unquote, urlparse
 import uuid as _uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -297,6 +299,18 @@ def get_sender_name(msg, name_cache: dict) -> str:
 # Output
 # ======================================================================
 
+def extract_filenames(file_urls: list[str]) -> list[str]:
+    """ファイルURL一覧からファイル名を抽出する。"""
+    names = []
+    for url in file_urls:
+        path = urlparse(url).path
+        name = posixpath.basename(unquote(path))
+        if not name or '.' not in name:
+            name = "(file)"
+        names.append(name)
+    return names
+
+
 def format_text_output(
     messages: list, name_cache: dict, room_id: str, after_dt: datetime,
     space_name: str | None = None,
@@ -318,13 +332,23 @@ def format_text_output(
 
         sender = get_sender_name(msg, name_cache)
 
-        # 本文: text → markdown → [Attachment only]
         body = getattr(msg, "text", None) or getattr(msg, "markdown", None)
+
+        # 添付ファイル名
+        files = getattr(msg, "files", None) or []
+        filenames = extract_filenames(files)
+
         if not body:
-            body = "[Attachment only]"
+            if filenames:
+                body = f"[Files: {', '.join(filenames)}]"
+            else:
+                body = "[Attachment only]"
+            filenames = []  # bodyに含めたので重複表示しない
 
         lines.append(f"{time_str} [{sender}]")
         lines.append(body)
+        if filenames:
+            lines.append(f"[Files: {', '.join(filenames)}]")
         lines.append("")
 
     # フッター
@@ -360,6 +384,7 @@ def format_json_output(
             "text": getattr(msg, "text", None),
             "markdown": getattr(msg, "markdown", None),
             "files": getattr(msg, "files", None) or [],
+            "filenames": extract_filenames(getattr(msg, "files", None) or []),
         }
         msg_list.append(entry)
 
