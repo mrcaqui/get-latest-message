@@ -1,5 +1,38 @@
 # Progress
 
+## 2026/03/13
+
+#### 1. Content-Disposition ヘッダーによるファイル名解決 (v0.5.0)
+
+**Issue**
+
+- Webex のファイル添付URLは `https://webexapis.com/v1/contents/<content-id>` 形式のため、URLパスからファイル名を抽出できず、すべて `(file)` と表示されていた。
+
+**Changes**
+
+- HEADリクエストで `Content-Disposition` ヘッダーからファイル名を取得するロジックを実装。`filename*=UTF-8''...` (RFC 5987) を優先し、`filename="..."` にフォールバック。
+- `ThreadPoolExecutor(max_workers=25)` による並列HEADリクエストでパフォーマンスを確保。
+- URLエンコードされた日本語ファイル名を `unquote_plus` で正しくデコード（`+` → スペース対応）。
+- HEADリクエスト失敗時はURLパスからのフォールバックを維持。
+
+**Changed files**
+
+- get_messages.py
+
+#### 2. 添付ファイル名表示 (v0.4.0)
+
+**Changes**
+
+- 添付ファイル付きメッセージでファイル名を表示する機能を追加。URLパスからファイル名を抽出し、テキスト出力では `[Files: filename.png]` として表示。
+- 本文なし＋ファイルありの場合は `[Files: ...]` を本文として表示。本文あり＋ファイルありの場合は本文の次行に表示。
+- JSON出力に `filenames` フィールドを追加（既存の `files` (生URL) は後方互換のため維持）。
+- ファイル名が取れないURL（Webex contents API URLなど拡張子なし）は `(file)` にフォールバック。
+
+**Changed files**
+
+- get_messages.py
+- docs/progress.md
+
 ## 2026/03/10
 
 #### 1. Webex Room メッセージ取得CLIツール 初期実装 (v0.1.0)
@@ -53,17 +86,3 @@
 - .env.example
 - .gitignore
 - requirements.txt
-
-#### 4. 添付ファイル名表示 (v0.4.0)
-
-**Changes**
-
-- 添付ファイル付きメッセージでファイル名を表示する機能を追加。URLパスからファイル名を抽出し、テキスト出力では `[Files: filename.png]` として表示。
-- 本文なし＋ファイルありの場合は `[Files: ...]` を本文として表示。本文あり＋ファイルありの場合は本文の次行に表示。
-- JSON出力に `filenames` フィールドを追加（既存の `files` (生URL) は後方互換のため維持）。
-- ファイル名が取れないURL（Webex contents API URLなど拡張子なし）は `(file)` にフォールバック。
-
-**Changed files**
-
-- get_messages.py
-- docs/progress.md

@@ -6,16 +6,20 @@
 
 import argparse
 import base64
+import concurrent.futures
 import json
 import posixpath
 import re
 import subprocess
 import sys
-from urllib.parse import unquote, urlparse
+import threading
+from urllib.parse import unquote, unquote_plus, urlparse
 import uuid as _uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+import requests
 
 from dotenv import load_dotenv
 from webexpythonsdk import WebexAPI
@@ -299,21 +303,98 @@ def get_sender_name(msg, name_cache: dict) -> str:
 # Output
 # ======================================================================
 
-def extract_filenames(file_urls: list[str]) -> list[str]:
-    """ファイルURL一覧からファイル名を抽出する。"""
-    names = []
-    for url in file_urls:
-        path = urlparse(url).path
-        name = posixpath.basename(unquote(path))
-        if not name or '.' not in name:
-            name = "(file)"
-        names.append(name)
-    return names
+def _resolve_filename_from_url(url: str, auth_headers: dict, verbose: bool) -> str | None:
+    """HEAD リクエストで Content-Disposition からファイル名を取得する。"""
+    try:
+        resp = requests.head(url, headers=auth_headers, timeout=10, allow_redirects=True)
+        resp.raise_for_status()
+        cd = resp.headers.get("Content-Disposition", "")
+        if not cd:
+            return None
+        # filename*=UTF-8''<encoded> を優先
+        m = re.search(r"filename\*\s*=\s*UTF-8''(.+?)(?:;|$)", cd, re.IGNORECASE)
+        if m:
+            return unquote_plus(m.group(1).strip())
+        # filename="<name>" フォールバック
+        m = re.search(r'filename\s*=\s*"([^"]+)"', cd)
+        if m:
+            return unquote_plus(m.group(1).strip())
+        # filename=<name> (引用符なし)
+        m = re.search(r'filename\s*=\s*([^;\s]+)', cd)
+        if m:
+            return unquote_plus(m.group(1).strip())
+        return None
+    except requests.exceptions.RequestException as e:
+        if verbose:
+            print(f"[verbose] HEAD request failed for {url}: {e}", file=sys.stderr)
+        return None
+
+
+def _fallback_filename_from_url(url: str) -> str:
+    """URL パスからファイル名を抽出するフォールバック。"""
+    path = urlparse(url).path
+    name = posixpath.basename(unquote(path))
+    # クエリパラメータ除去
+    name = name.split("?")[0]
+    if not name or "." not in name:
+        return "(file)"
+    return name
+
+
+def resolve_filenames_batch(
+    messages: list, auth_headers: dict, verbose: bool,
+) -> dict[str, list[str]]:
+    """全メッセージの添付ファイル名を並列 HEAD リクエストで一括解決する。"""
+    # URL → メッセージID のマッピング（重複排除）
+    url_to_msg_ids: dict[str, list[str]] = {}
+    for msg in messages:
+        files = getattr(msg, "files", None) or []
+        for url in files:
+            url_to_msg_ids.setdefault(url, []).append(msg.id)
+
+    if not url_to_msg_ids:
+        return {}
+
+    url_to_name: dict[str, str] = {}
+    sem = threading.Semaphore(25)
+    head_success = 0
+    lock = threading.Lock()
+
+    def _resolve(url: str) -> None:
+        nonlocal head_success
+        with sem:
+            name = _resolve_filename_from_url(url, auth_headers, verbose)
+        if name:
+            with lock:
+                head_success += 1
+            url_to_name[url] = name
+        else:
+            url_to_name[url] = _fallback_filename_from_url(url)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
+        futures = [executor.submit(_resolve, url) for url in url_to_msg_ids]
+        concurrent.futures.wait(futures)
+
+    if verbose:
+        total = len(url_to_msg_ids)
+        print(
+            f"[verbose] File name resolution: {head_success}/{total} resolved via HEAD.",
+            file=sys.stderr,
+        )
+
+    # メッセージ単位の結果を構築
+    result: dict[str, list[str]] = {}
+    for msg in messages:
+        files = getattr(msg, "files", None) or []
+        if files:
+            result[msg.id] = [url_to_name.get(url, "(file)") for url in files]
+    return result
 
 
 def format_text_output(
     messages: list, name_cache: dict, room_id: str, after_dt: datetime,
     space_name: str | None = None,
+    filename_cache: dict[str, list[str]] | None = None,
 ) -> str:
     """text 形式の出力文字列を生成する。"""
     after_utc_str = format_utc_iso(after_dt)
@@ -336,7 +417,10 @@ def format_text_output(
 
         # 添付ファイル名
         files = getattr(msg, "files", None) or []
-        filenames = extract_filenames(files)
+        if filename_cache is not None:
+            filenames = filename_cache.get(msg.id, [])
+        else:
+            filenames = [_fallback_filename_from_url(u) for u in files]
 
         if not body:
             if filenames:
@@ -368,13 +452,19 @@ def format_text_output(
 
 
 def format_json_output(
-    messages: list, name_cache: dict, room_id: str, after_dt: datetime
+    messages: list, name_cache: dict, room_id: str, after_dt: datetime,
+    filename_cache: dict[str, list[str]] | None = None,
 ) -> str:
     """JSON 形式の出力文字列を生成する。"""
     after_utc_str = format_utc_iso(after_dt)
 
     msg_list = []
     for msg in messages:
+        files = getattr(msg, "files", None) or []
+        if filename_cache is not None:
+            filenames = filename_cache.get(msg.id, [])
+        else:
+            filenames = [_fallback_filename_from_url(u) for u in files]
         entry = {
             "id": msg.id,
             "created": _created_to_isostr(msg.created),
@@ -383,8 +473,8 @@ def format_json_output(
             "displayName": get_sender_name(msg, name_cache),
             "text": getattr(msg, "text", None),
             "markdown": getattr(msg, "markdown", None),
-            "files": getattr(msg, "files", None) or [],
-            "filenames": extract_filenames(getattr(msg, "files", None) or []),
+            "files": files,
+            "filenames": filenames,
         }
         msg_list.append(entry)
 
@@ -553,11 +643,15 @@ def main() -> None:
     # 投稿者名解決
     name_cache = resolve_names(api, messages, verbose)
 
+    # 添付ファイル名解決
+    auth_headers = dict(api._session.headers)
+    filename_cache = resolve_filenames_batch(messages, auth_headers, verbose)
+
     # 出力生成
     if args.format == "json":
-        result = format_json_output(messages, name_cache, room_id, after_dt)
+        result = format_json_output(messages, name_cache, room_id, after_dt, filename_cache=filename_cache)
     else:
-        result = format_text_output(messages, name_cache, room_id, after_dt, space_name=space_name)
+        result = format_text_output(messages, name_cache, room_id, after_dt, space_name=space_name, filename_cache=filename_cache)
 
     # stdout 出力（先に実行）
     print(result)
