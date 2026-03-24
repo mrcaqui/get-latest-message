@@ -209,13 +209,20 @@ def _created_to_isostr(value) -> str:
     return str(value)
 
 
-def validate_room(api: WebexAPI, room_id: str, verbose: bool) -> str:
-    """Room の存在とアクセス権を事前確認し、Room タイトルを返す。"""
+def validate_room(api: WebexAPI, room_id: str, verbose: bool) -> tuple[str, str]:
+    """Room の存在とアクセス権を事前確認し、(正規 roomId, タイトル) を返す。
+
+    API が返す roomId はリージョン情報を含む正規形式であり、
+    messages.list 等の後続 API 呼び出しにはこちらを使用する必要がある。
+    """
     try:
         room = api.rooms.get(room_id)
+        canonical_id = room.id
         if verbose:
             print(f"[verbose] Room validated: {room.title}", file=sys.stderr)
-        return room.title
+            if canonical_id != room_id:
+                print(f"[verbose] Canonical roomId: {canonical_id}", file=sys.stderr)
+        return (canonical_id, room.title)
     except ApiError as e:
         status = e.status_code if hasattr(e, "status_code") else None
         if status == 401:
@@ -624,8 +631,10 @@ def main() -> None:
         print(f"Error: Failed to initialize Webex API: {e}", file=sys.stderr)
         sys.exit(EXIT_API_ERROR)
 
-    # Room 検証
-    validate_room(api, room_id, verbose)
+    # Room 検証 & 正規 roomId 取得
+    room_id, room_title = validate_room(api, room_id, verbose)
+    if not space_name:
+        space_name = room_title
 
     # メッセージ取得
     try:

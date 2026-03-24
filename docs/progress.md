@@ -1,5 +1,23 @@
 # Progress
 
+## 2026-03-24
+
+#### 1. roomId 正規化による messages.list 404 問題の修正 (v0.5.1)
+
+**Issue**
+
+- UUID から生成した roomId（`ciscospark://us/ROOM/...`）と、API が返す正規の roomId（`ciscospark://urn:TEAM:us-west-2_r/ROOM/...`）のリージョン部分が異なる Space が存在した。`rooms.get()` は内部で名寄せされるため成功するが、`messages.list()` は正確な roomId が必要で 404 を返していた。
+
+**Changes**
+
+- `validate_room()` の戻り値を `str`（タイトル）から `tuple[str, str]`（正規 roomId, タイトル）に変更。`room.id` を取得して後続 API 呼び出しに使用するようにした。
+- `--room-id` 直接指定時に `space_name` が `None` だった問題を修正。`room_title` をフォールバックとして設定し、テキスト出力に Space 名ヘッダーが常に表示されるようにした。
+- verbose モードで正規 roomId が入力と異なる場合にログ出力を追加。
+
+**Changed files**
+
+- get_messages.py
+
 ## 2026/03/13
 
 #### 1. Content-Disposition ヘッダーによるファイル名解決 (v0.5.0)
