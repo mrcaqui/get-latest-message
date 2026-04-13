@@ -247,18 +247,38 @@ def fetch_messages(
     limit: int,
     verbose: bool,
 ) -> list:
-    """指定日時以降のメッセージを取得し、時系列順のリストで返す。"""
+    """指定日時以降のメッセージを取得し、時系列順のリストで返す。
+
+    Webex API は基本的に created 降順で返すが、実測で単発の非降順メッセージ
+    （スレッド親が本来の順序より後ろに挿入される）が混入するケースが確認された。
+    そのため `created < after_dt` では即 break せず continue でスキップし、
+    N 件連続で古いメッセージが続いたときに初めて打ち切る。
+    """
+    OLD_RUN_CUTOFF = 50
     collected = []
-    count = 0
+    consecutive_old = 0
+
     for msg in api.messages.list(roomId=room_id, max=200):
         created = _parse_created(msg.created)
         if created < after_dt:
-            break
+            consecutive_old += 1
+            if consecutive_old >= OLD_RUN_CUTOFF:
+                if verbose:
+                    print(
+                        f"[verbose] {consecutive_old} consecutive old messages, stopping.",
+                        file=sys.stderr,
+                    )
+                break
+            continue
+
+        consecutive_old = 0
         collected.append(msg)
-        count += 1
-        if count >= limit:
+        if len(collected) >= limit:
             if verbose:
-                print(f"[verbose] Reached limit ({limit}), stopping.", file=sys.stderr)
+                print(
+                    f"[verbose] Reached limit ({limit}), stopping.",
+                    file=sys.stderr,
+                )
             break
 
     if verbose:
