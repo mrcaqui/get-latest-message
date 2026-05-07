@@ -15,7 +15,7 @@ import sys
 import threading
 from urllib.parse import unquote, unquote_plus, urlparse
 import uuid as _uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -418,6 +418,40 @@ def resolve_filenames_batch(
     return result
 
 
+def _format_message_block_lines(
+    msg, name_cache: dict, filename_cache: dict[str, list[str]] | None,
+) -> list[str]:
+    """1メッセージを 4行ブロック（時刻 [送信者] / 本文 / [Files: ...] / 空行）の行リストで返す。"""
+    created = _parse_created(msg.created)
+    local_created = created.astimezone(LOCAL_TZ)
+    time_str = local_created.strftime("%Y-%m-%d %H:%M:%S %z")
+    # %z は +0900 形式なので +09:00 に変換
+    time_str = time_str[:-2] + ":" + time_str[-2:]
+
+    sender = get_sender_name(msg, name_cache)
+
+    body = getattr(msg, "text", None) or getattr(msg, "markdown", None)
+
+    files = getattr(msg, "files", None) or []
+    if filename_cache is not None:
+        filenames = filename_cache.get(msg.id, [])
+    else:
+        filenames = [_fallback_filename_from_url(u) for u in files]
+
+    if not body:
+        if filenames:
+            body = f"[Files: {', '.join(filenames)}]"
+        else:
+            body = "[Attachment only]"
+        filenames = []
+
+    block = [f"{time_str} [{sender}]", body]
+    if filenames:
+        block.append(f"[Files: {', '.join(filenames)}]")
+    block.append("")
+    return block
+
+
 def format_text_output(
     messages: list, name_cache: dict, room_id: str, after_dt: datetime,
     space_name: str | None = None,
@@ -432,37 +466,8 @@ def format_text_output(
     if space_name:
         lines.append(f"[{space_name}]")
     for msg in messages:
-        created = _parse_created(msg.created)
-        local_created = created.astimezone(LOCAL_TZ)
-        time_str = local_created.strftime("%Y-%m-%d %H:%M:%S %z")
-        # %z は +0900 形式なので +09:00 に変換
-        time_str = time_str[:-2] + ":" + time_str[-2:]
+        lines.extend(_format_message_block_lines(msg, name_cache, filename_cache))
 
-        sender = get_sender_name(msg, name_cache)
-
-        body = getattr(msg, "text", None) or getattr(msg, "markdown", None)
-
-        # 添付ファイル名
-        files = getattr(msg, "files", None) or []
-        if filename_cache is not None:
-            filenames = filename_cache.get(msg.id, [])
-        else:
-            filenames = [_fallback_filename_from_url(u) for u in files]
-
-        if not body:
-            if filenames:
-                body = f"[Files: {', '.join(filenames)}]"
-            else:
-                body = "[Attachment only]"
-            filenames = []  # bodyに含めたので重複表示しない
-
-        lines.append(f"{time_str} [{sender}]")
-        lines.append(body)
-        if filenames:
-            lines.append(f"[Files: {', '.join(filenames)}]")
-        lines.append("")
-
-    # フッター
     if messages:
         lines.append("---")
         lines.append(
@@ -476,6 +481,108 @@ def format_text_output(
         )
 
     return "\n".join(lines)
+
+
+def format_text_chunks(
+    messages: list,
+    name_cache: dict,
+    room_id: str,
+    after_dt: datetime,
+    space_name: str,
+    filename_cache: dict[str, list[str]] | None,
+    max_chars: int,
+) -> list[str]:
+    """メッセージ（投稿）単位で max_chars を超えないように分割した文字列のリストを返す。
+
+    返り値の各要素は1チャンクファイルに書き込むべき文字列全体。各要素は必ず
+    `[space_name]\n` から始まる。最後の要素にのみフッター行が付く。
+    メッセージが0件の場合は空リストを返す。
+    """
+    if not messages:
+        return []
+
+    after_utc_str = format_utc_iso(after_dt)
+    after_local = after_dt.astimezone(LOCAL_TZ)
+    after_local_str = after_local.strftime("%Y-%m-%d %H:%M %Z")
+    footer_lines = [
+        "---",
+        f"{len(messages)} messages found with created >= {after_utc_str} "
+        f"(= {after_local_str})",
+    ]
+
+    header = f"[{space_name}]"
+    header_len = len(header) + 1  # join 時の改行分
+
+    chunks: list[list[str]] = []
+    current_lines: list[str] = [header]
+    current_len = header_len
+    blocks_in_current = 0
+
+    def _block_len(block_lines: list[str]) -> int:
+        return sum(len(line) + 1 for line in block_lines)
+
+    for msg in messages:
+        block = _format_message_block_lines(msg, name_cache, filename_cache)
+        block_len = _block_len(block)
+
+        if blocks_in_current > 0 and current_len + block_len > max_chars:
+            chunks.append(current_lines)
+            current_lines = [header]
+            current_len = header_len
+            blocks_in_current = 0
+
+        if blocks_in_current == 0 and header_len + block_len > max_chars:
+            print(
+                f"Warning: single message block ({block_len} chars) exceeds "
+                f"--max-chars ({max_chars}); writing as oversized standalone chunk.",
+                file=sys.stderr,
+            )
+            current_lines.extend(block)
+            current_len += block_len
+            blocks_in_current += 1
+            chunks.append(current_lines)
+            current_lines = [header]
+            current_len = header_len
+            blocks_in_current = 0
+        else:
+            current_lines.extend(block)
+            current_len += block_len
+            blocks_in_current += 1
+
+    if blocks_in_current > 0:
+        current_lines.extend(footer_lines)
+        chunks.append(current_lines)
+    elif chunks:
+        chunks[-1].extend(footer_lines)
+
+    return ["\n".join(c) for c in chunks]
+
+
+def _sanitize_filename(name: str) -> str:
+    """AHK 側 SanitizeFileName と同じルールでファイル名安全化する。"""
+    result = re.sub(r'[<>:"/\\|?*\r\n]', "_", name)
+    result = re.sub(r"_+", "_", result)
+    result = result.strip(" _")
+    return result[:50] or "Unknown"
+
+
+def _cleanup_old_output_files(output_dir: Path) -> None:
+    """ファイル名先頭の yyyymmdd_HHmmss が7日より古い *.txt を削除する。"""
+    cutoff = datetime.now() - timedelta(days=7)
+    pattern = re.compile(r"^(\d{8})_(\d{6})_")
+    for f in output_dir.glob("*.txt"):
+        m = pattern.match(f.name)
+        if not m:
+            continue
+        try:
+            ts = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+        except ValueError:
+            continue
+        if ts < cutoff:
+            try:
+                f.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def format_json_output(
@@ -585,6 +692,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable clipboard copy.",
     )
+    parser.add_argument(
+        "--output-dir",
+        help=(
+            "If set, write chunked text files into this directory and skip "
+            "stdout full output / clipboard copy. stdout receives a one-line "
+            "summary instead. Cannot be combined with --format json."
+        ),
+    )
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=50000,
+        help=(
+            "Maximum characters per chunk file (default: 50000). "
+            "Splitting boundaries are at message (post) boundaries; a single "
+            "message that exceeds the limit is written as an oversized chunk."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -611,6 +736,9 @@ def main() -> None:
     args = parse_args()
     verbose = args.verbose
 
+    # 処理開始時刻（output-dir のファイル名 prefix に使う。全チャンク + __full.txt で共通）
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     # --- Auth mode ---
     if args.auth:
         webex_auth.run_oauth_flow(verbose)
@@ -622,6 +750,18 @@ def main() -> None:
         sys.exit(EXIT_ARG_ERROR)
     if not args.after:
         print("Error: --after は必須です。", file=sys.stderr)
+        sys.exit(EXIT_ARG_ERROR)
+    if args.output_dir and args.format == "json":
+        print(
+            "Error: --output-dir cannot be combined with --format json",
+            file=sys.stderr,
+        )
+        sys.exit(EXIT_ARG_ERROR)
+    if args.max_chars <= 0:
+        print(
+            f"Error: --max-chars must be positive (got {args.max_chars}).",
+            file=sys.stderr,
+        )
         sys.exit(EXIT_ARG_ERROR)
 
     # --- トークン解決 ---
@@ -676,7 +816,60 @@ def main() -> None:
     auth_headers = dict(api._session.headers)
     filename_cache = resolve_filenames_batch(messages, auth_headers, verbose)
 
-    # 出力生成
+    # --output-dir 指定時: 分割ファイル出力モード
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+        # クリーンアップより先に必ず作成（初回実行時に dir が無くても安全に動かすため）
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _cleanup_old_output_files(output_dir)
+
+        chunks = format_text_chunks(
+            messages,
+            name_cache,
+            room_id,
+            after_dt,
+            space_name or "Unknown Space",
+            filename_cache,
+            args.max_chars,
+        )
+
+        after_utc_str = format_utc_iso(after_dt)
+        if not chunks:
+            print("0 messages found, 0 chunks")
+            print(
+                f"0 messages found with created >= {after_utc_str} "
+                f"(no output files written)",
+                file=sys.stderr,
+            )
+            return
+
+        sanitized_space = _sanitize_filename(space_name or "Unknown")
+        prefix = f"{run_timestamp}_{sanitized_space}"
+
+        full_text = format_text_output(
+            messages, name_cache, room_id, after_dt,
+            space_name=space_name, filename_cache=filename_cache,
+        )
+        (output_dir / f"{prefix}__full.txt").write_text(full_text, encoding="utf-8")
+
+        total = len(chunks)
+        width = max(2, len(str(total)))
+        for idx, chunk in enumerate(chunks, start=1):
+            idx_str = format(idx, f"0{width}d")
+            total_str = format(total, f"0{width}d")
+            (output_dir / f"{prefix}__{idx_str}of{total_str}.txt").write_text(
+                chunk, encoding="utf-8"
+            )
+
+        print(f"{len(messages)} messages found, {total} chunks")
+        print(
+            f"Wrote {total} chunks (full file: {prefix}__full.txt, "
+            f"total {len(messages)} messages) to {output_dir}",
+            file=sys.stderr,
+        )
+        return
+
+    # --output-dir 未指定: 従来通り stdout + クリップボード
     if args.format == "json":
         result = format_json_output(messages, name_cache, room_id, after_dt, filename_cache=filename_cache)
     else:

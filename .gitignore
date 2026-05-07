@@ -13,6 +13,9 @@ __pycache__/
 # Temporary files
 room_temp.txt
 
+# Get Messages output (chunked text files; auto-cleaned after 7 days)
+messages/
+
 # plan and doc files
 plans/
 docs/memo.md

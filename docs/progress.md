@@ -1,5 +1,30 @@
 # Progress
 
+## 2026-05-07
+
+#### 1. メッセージ分割ファイル出力モード `--output-dir` 追加 (v0.6.0)
+
+**Issue**
+
+- Webex メッセージ量が多い Space を要約 AI（Circuit Headless）に投げるとコンテキスト長で処理がスタックする。
+- 複数 Space の取得結果をクリップボード経由で受け渡していたため、並行運用するとクリップボードが上書きされてメッセージ取得からやり直しになっていた。
+
+**Changes**
+
+- `--output-dir <path>` を追加。指定するとメッセージを投稿（4 行ブロック）境界で分割し、`<yyyymmdd_HHmmss>_<space>__NNofMM.txt`（ゼロ埋め 2 桁固定）の連番テキストファイルを書き出す。各チャンクの 1 行目には `[Space名]` を必ず付与（プロンプト `01_Chatナレッジ収集` 等が要求する形式に合わせる）。最終チャンクのみ末尾に `--- N messages found ...` フッターを付ける。
+- 取りこぼし検証用に分割前の全文を `<prefix>__full.txt` として併せて保存。
+- `--max-chars <int>`（デフォルト 50000）を追加。1 チャンクの最大文字数。1 投稿単独で超過する場合は警告を stderr に出して単独チャンクとして出力（投稿途中での分割はしない）。
+- `--output-dir` モードでは stdout には `M messages found, N chunks` の 1 行サマリのみを出し、クリップボードへのコピーは行わない（既存の `--output-dir` 未指定フローはそのまま）。
+- `--output-dir` + `--format json` の併用は `EXIT_ARG_ERROR` で拒否。
+- `<output_dir>` 配下の `*.txt` のうち、ファイル名 prefix `yyyymmdd_HHmmss` が 7 日より古いものを実行開始時に自動削除（mtime 非依存で予測可能）。
+- 共通ヘルパー `_format_message_block_lines()`、新関数 `format_text_chunks()`、`_sanitize_filename()`（AHK 側 `SanitizeFileName` と同等ルール）、`_cleanup_old_output_files()` を追加。`format_text_output()` は内部で `_format_message_block_lines()` を呼ぶ形に整理し、出力結果は従来と同一。
+- `messages/` ディレクトリを `.gitignore` に追加（生成物。7 日経過で自動削除）。
+
+**Changed files**
+
+- get_messages.py
+- .gitignore
+
 ## 2026-04-13
 
 #### 1. `--after` 指定時に古い日付のメッセージが欠落する問題の修正 (v0.5.2)
