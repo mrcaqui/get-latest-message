@@ -244,7 +244,7 @@ def fetch_messages(
     api: WebexAPI,
     room_id: str,
     after_dt: datetime,
-    limit: int,
+    limit: int | None,
     verbose: bool,
 ) -> list:
     """指定日時以降のメッセージを取得し、時系列順のリストで返す。
@@ -273,7 +273,7 @@ def fetch_messages(
 
         consecutive_old = 0
         collected.append(msg)
-        if len(collected) >= limit:
+        if limit is not None and len(collected) >= limit:
             if verbose:
                 print(
                     f"[verbose] Reached limit ({limit}), stopping.",
@@ -674,8 +674,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--limit", "-l",
         type=int,
-        default=1000,
-        help="Maximum number of messages to fetch (default: 1000).",
+        default=None,
+        help="Maximum number of messages to fetch (default: unlimited).",
     )
     parser.add_argument(
         "--region",
