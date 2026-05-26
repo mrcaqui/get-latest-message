@@ -15,7 +15,7 @@ import sys
 import threading
 from urllib.parse import unquote, unquote_plus, urlparse
 import uuid as _uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -60,6 +60,7 @@ SPACE_NAME_PATTERN = re.compile(
 )
 
 LOCAL_TZ = ZoneInfo("Asia/Tokyo")
+OUTPUT_FULL_FILES_TO_KEEP = 30
 
 
 # ======================================================================
@@ -566,23 +567,59 @@ def _sanitize_filename(name: str) -> str:
     return result[:50] or "Unknown"
 
 
-def _cleanup_old_output_files(output_dir: Path) -> None:
-    """ファイル名先頭の yyyymmdd_HHmmss が7日より古い *.txt を削除する。"""
-    cutoff = datetime.now() - timedelta(days=7)
-    pattern = re.compile(r"^(\d{8})_(\d{6})_")
-    for f in output_dir.glob("*.txt"):
-        m = pattern.match(f.name)
-        if not m:
+def _output_file_sort_key(path: Path) -> tuple[datetime, str]:
+    match = re.match(r"^(\d{8})_(\d{6})_", path.name)
+    if match:
+        try:
+            return (
+                datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S"),
+                path.name,
+            )
+        except ValueError:
+            pass
+    return (datetime.fromtimestamp(path.stat().st_mtime), path.name)
+
+
+def _generated_output_prefix(filename: str) -> str | None:
+    if filename.endswith("__full.txt"):
+        return filename[:-len("__full.txt")]
+
+    match = re.match(r"^(\d{8}_\d{6}_.+)__\d+of\d+\.txt$", filename)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _cleanup_old_output_files(
+    output_dir: Path,
+    keep_full_files: int = OUTPUT_FULL_FILES_TO_KEEP,
+) -> int:
+    """最新 keep_full_files 件の *__full.txt に対応する出力だけを保持する。"""
+    if keep_full_files < 0:
+        raise ValueError("keep_full_files must be non-negative")
+
+    full_files = sorted(
+        output_dir.glob("*__full.txt"),
+        key=_output_file_sort_key,
+        reverse=True,
+    )
+    kept_prefixes = {
+        full_file.name[:-len("__full.txt")]
+        for full_file in full_files[:keep_full_files]
+    }
+
+    output_files = [f for f in output_dir.glob("*.txt") if f.is_file()]
+    deleted = 0
+    for f in output_files:
+        prefix = _generated_output_prefix(f.name)
+        if prefix is None or prefix in kept_prefixes:
             continue
         try:
-            ts = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
-        except ValueError:
-            continue
-        if ts < cutoff:
-            try:
-                f.unlink(missing_ok=True)
-            except Exception:
-                pass
+            f.unlink(missing_ok=True)
+            deleted += 1
+        except Exception:
+            pass
+    return deleted
 
 
 def format_json_output(
@@ -819,9 +856,7 @@ def main() -> None:
     # --output-dir 指定時: 分割ファイル出力モード
     if args.output_dir:
         output_dir = Path(args.output_dir)
-        # クリーンアップより先に必ず作成（初回実行時に dir が無くても安全に動かすため）
         output_dir.mkdir(parents=True, exist_ok=True)
-        _cleanup_old_output_files(output_dir)
 
         chunks = format_text_chunks(
             messages,
@@ -867,6 +902,13 @@ def main() -> None:
             f"total {len(messages)} messages) to {output_dir}",
             file=sys.stderr,
         )
+        deleted_count = _cleanup_old_output_files(output_dir)
+        if verbose and deleted_count:
+            print(
+                f"[verbose] Removed {deleted_count} old output files; "
+                f"kept latest {OUTPUT_FULL_FILES_TO_KEEP} full files.",
+                file=sys.stderr,
+            )
         return
 
     # --output-dir 未指定: 従来通り stdout + クリップボード
